@@ -1,0 +1,37 @@
+{
+  "networkMode": "bridge",
+  "containerDefinitions": [
+    {
+      "environment": [
+        {
+          "name": "NODE_ENV",
+          "value": "production"
+        },
+        {
+          "name": "JENKINS_BUILD",
+          "value": "N/A"
+        }
+      ],
+      "portMappings": [
+        {
+          "hostPort": 180,
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],        
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "example-project",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "prd"
+        }
+      },
+      "essential": true,
+      "name": "example-project",
+      "image": "<your-aws-account-number>.dkr.ecr.us-east-1.amazonaws.com/example-project:latest",
+      "memoryReservation": 512
+    }
+  ],
+  "family": "example-project"
+}

@@ -1,0 +1,22 @@
+{
+   "alb" : {
+      "healthCheckPath" : "/",
+      "securityGroups" : "sg-123abc01 sg-123abc02",
+      "subnets" : "subnet-123abc03 subnet-123abc02 subnet-123abc03",
+      "vpcID" : "vpc-123abc01"
+   },
+   "build" : {
+      "dockerFilePath" : "Dockerfile"
+   },
+   "ecs" : {
+      "clusterName" : "example-clustername",
+      "instanceIds" : "i-1234567890abcdef1 i-1234567890abcdef2 i-1234567890abcdef3"
+   },
+   "environmentType" : "prd",
+   "project" : {
+      "clientCode" : "CODE",
+      "jobNumber" : "1234",
+      "name" : "example-project"
+   },
+   "url" : "http://project.example.com/"
+}
