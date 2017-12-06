@@ -1,0 +1,434 @@
+#!/usr/bin/perl
+
+=pod =======================================================
+
+=head1 SYNOPSIS
+
+MODULE NAME: ecs-deploy 
+
+DESCRIPTION: Fully automated AWS ECS deployments, including
+  creation of Docker images, ECS Tasks, Services, Target Groups
+  and Application Load Balancers.
+
+NOTES: 
+
+AUTHOR: Troy Conrad <troy.conrad@mirumagency.com>
+
+=cut =======================================================
+
+package Mirum::ECS_Deploy;
+
+$SCRIPT_NAME = 'ecs-deploy';
+
+$VERSION = '1.0.2'; # Modified 05Dec2017
+
+######### ENVIRONMENT VALUES #########
+
+$awsCmd    = 'aws'; # aws cli shell command
+$dockerCmd = 'docker'; # docker cli shell command
+
+#
+##
+#####################################
+############ MAIN SCRIPT ############
+#####################################
+
+use Getopt::Std;
+use JSON::PP;
+use Term::ANSIColor;
+
+require "/opt/$SCRIPT_NAME/$SCRIPT_NAME".'-lib.pl';
+
+my %opts = ();
+
+getopts('d:t:v:hV', \%opts); # process command line switches into $opts{*} vars
+
+our $VERBOSITY = $opts{v} ||= 1;
+
+if ($opts{h})
+{
+  print <<EOS;
+$SCRIPT_NAME version $VERSION
+
+Fully automated AWS ECS deployments, including creation of Docker images, ECS Tasks, Services, Target Groups and Application Load Balancers.
+
+Usage:
+
+$SCRIPT_NAME [-v 1-4 ] -d <deploy-info-file> -t <task-definition-file [-h] [-V]
+
+Options:
+
+  -d <deploy-info-file> Path to required deploy info JSON file. Required.
+
+  -t <task-def-file>    Path to required Docker task definition JSON file.
+
+  -h                    Show this Help screen and exit.
+
+  -v <0-4>              Specify the verbosity of console output, higher numbers are more verbose.
+                        Default is 1.
+
+  -V                    Show Version info and exit.
+
+Examples:
+
+- Deploy Docker task described in taskDefinition.json, with settings from deployInfo.json, with medium-level logging.
+
+  $SCRIPT_NAME -v 2 -d deployInfo.json -t taskDefinition.json
+EOS
+
+  exit;
+}
+
+if ( $opts{V} ) { print "$SCRIPT_NAME $VERSION\n"; exit; }
+
+print "\n", color('bold blue'), "✔ $SCRIPT_NAME $VERSION started.\n", color('reset');
+
+print color('bold blue'), "• Collecting deployment info...\n", color('reset');
+
+#
+##
+### COLLECT REQUIRED INFO ###
+
+# init a JSON<->Perl converter object
+$json = JSON::PP->new->ascii->canonical->pretty->allow_nonref;
+
+# PROCESS DEPLOY INFO #
+
+$deployInfoFile = $opts{d} ||= 'deployInfo.json';
+
+# read file contents and decode JSON into Perl data structure
+my $deployInfo = $json->decode(readFile($deployInfoFile));
+
+# extract to vars #
+
+$projectName = $deployInfo->{project}->{name}; # name of project.
+# Basis of docker image, task and service name and CloudWatch log group name.
+
+
+$clientCode = $deployInfo->{project}->{clientCode}; # for resource tagging
+$jobNumber = $deployInfo->{project}->{jobNumber}; # for resource tagging
+
+# Determines NODE_ENV value, docker image/task/service names,
+# CloudWatch group, load balancer names AND docker task count
+$environmentType = $deployInfo->{environmentType}; # prd, stg, qa, dev
+
+$url = $deployInfo->{url}; # deploy URL for Route 53 and notification messages
+
+$clusterName = $deployInfo->{ecs}->{clusterName}; # ECS cluster to deploy to
+#$ecsTargets = $deployInfo->{ecs}->{instanceIds};
+
+$albSecurityGroups = $deployInfo->{alb}->{securityGroups};
+$albSubnets = $deployInfo->{alb}->{subnets};
+$albVpcId = $deployInfo->{alb}->{vpcID};
+
+# Path AWS health check will use to determine instance health, defaults to '/'
+$healthCheckPath = $deployInfo->{alb}->{healthCheckPath} ||= '/';
+
+$dockerFile = $deployInfo->{build}->{dockerFilePath}; # path to Dockerfile in workspace root
+
+# PROCESS TASK INFO #
+
+$taskDefFile = $opts{t} ||= 'taskDefinition.json';
+
+# read file contents (keep in JSON for aws cli)
+$taskDefJSON = readFile($taskDefFile);
+
+# Decode JSON into Perl data structure
+$taskDef = $json->decode($taskDefJSON);
+
+$hostPort = $taskDef->{containerDefinitions}->[0]->{portMappings}->[0]->{hostPort};
+$dockerImage = $taskDef->{containerDefinitions}->[0]->{image};
+$deployName = $taskDef->{family};
+
+$taskName = $deployName;
+$serviceName = "$deployName-svc";
+
+$logsGroupName = $projectName;
+
+# PROCESS SERVICE INFO #
+
+my $envSettings = getEnvironmentSettings($environmentType);
+
+($nodeEnv,$nameSuffix,$hostPortSuffix,$taskCount) = @{$envSettings};
+
+$deployURL = $deployInfo->{url};
+
+# check for required values
+for ( qw( dockerFile deployName dockerImage clusterName serviceName
+  taskName taskCount hostPort logsGroupName deployURL albSecurityGroups albSubnets albVpcId ) )
+{
+  ${$_} or die "The $_ property must be specified.\n";
+}
+
+$deployMsg = "docker image '$deployName' as task '$taskName' in service '$serviceName' to cluster '$clusterName'";
+print color('bold'), "Deploying $deployMsg.\n\n", color('reset');
+
+print color('bold blue'), "• Checking environment...\n", color('reset');
+
+runCmd("$awsCmd --version 2>&1 | grep 'aws-cli'", 0, 1)
+  or die "Unsuported AWS CLI version. Try running `pip install awscli --upgrade --user`";
+
+runCmd("$dockerCmd --version | grep 'Docker version'", 0, 1)
+  or die "Unsuported Docker version. (You DO have Docker installed right?)";
+
+# get Amazon ECR login command
+$dockerLoginCmd = `$awsCmd ecr get-login --no-include-email --region us-east-1`;
+
+if ($dockerLoginCmd =~ /docker login/) # success
+{
+  # prefix result with 'sudo ' & trim newline
+  chomp( $dockerLoginCmd = "$dockerLoginCmd" );
+}
+else { die "Failed to retrieve ECR Docker login command from the AWS CLI."; }
+
+#
+##
+### CREATE CLOUDWATCH LOGS GROUP ###
+
+print color('bold blue'), "• Checking for CloudWatch logs group...\n", color('reset');
+
+$groupExists = runCmd( "$awsCmd logs describe-log-groups --max-items 1 --log-group-name-prefix $logsGroupName | grep logGroupName", $verbose , 1 );
+
+unless ($groupExists)
+{
+  print color('bold blue'), "▸ Creating '$logsGroupName' CloudWatch logs group ...\n", color('reset');
+  runCmd( "$awsCmd logs create-log-group --log-group-name $logsGroupName" , $verbose );
+}
+
+#
+##
+### BUILD DOCKER IMAGE ###
+
+print color('bold blue'), "▸ Building '$deployName' Docker image...\n", color('reset');
+
+# build docker image from Dockerfile in repo
+#runCmd( "$dockerCmd build -f $dockerFile -t $deployName ." , $verbose );
+
+#my $result = '';
+open my $proc, '-|', "$dockerCmd build -f $dockerFile -t $deployName .";
+while (<$proc>) {
+    print $_;
+    #$result .= $_;
+}
+
+#
+##
+### PUSH IMAGE TO DOCKER REPO ###
+
+print color('bold blue'), "• Checking for Docker image repo...\n", color('reset');
+
+$repoExists = runCmd( "$awsCmd ecr describe-repositories --max-items 1 --repository-names $deployName" , $verbose , 1 );
+
+unless ($repoExists)
+{
+  print color('bold blue'), "▸ Creating Docker image repo...\n", color('reset');
+  runCmd( "$awsCmd ecr create-repository --repository-name $deployName" , $verbose );
+}
+
+print color('bold blue'), "▸ Pushing Docker image to repo...\n", color('reset');
+
+# tag built docker image
+runCmd( "$dockerCmd tag $deployName:latest $dockerImage" , $verbose );
+
+# log into the AWS ECR docker registry
+runCmd( $dockerLoginCmd , $verbose );
+
+# push tagged image to the AWS ECR docker registry
+runCmd( "$dockerCmd push $dockerImage" , $verbose );
+
+#
+##
+### UPDATE AWS ECS TASK DEFINITION ###
+
+print color('bold blue'), "▸ Updating ECS task definition with latest image...\n", color('reset');
+
+# init a JSON<->Perl converter object for later use
+$json = JSON::PP->new->ascii->canonical->pretty->allow_nonref;
+
+# register the updated task definition to AWS ECS
+# no verbose since output is explicitly handled.
+$resultJson = runCmd( "$awsCmd ecs register-task-definition --cli-input-json file://$taskDefFile" , $verbose );
+
+#
+##
+### CREATE/UPDATE AWS ALB ###
+
+print color('bold blue'), "• Checking for application load balancer (ALB)...\n", color('reset');
+
+$cmd = "$awsCmd elbv2 describe-load-balancers --max-items 1 --names $deployName";
+$albExists = runCmd( $cmd , $verbose , 1 );
+
+if ($albExists)
+{
+  my $alb = $json->decode($albExists);
+  $albArn = $alb->{LoadBalancers}->[0]->{LoadBalancerArn};
+  $albName = $alb->{LoadBalancers}->[0]->{LoadBalancerName};
+  print "Found '$albName' application load balancer.\n";
+}
+else
+{
+  print color('bold blue'), "▸ Creating '$deployName' application load balancer (ALB)...\n", color('reset');
+  # create the ALB
+  # no verbose since output is explicitly handled.
+  $tags = "Key=jobNumber,Value=$jobNumber Key=clientCode,Value=$clientCode";
+  my $args = "--name $deployName --subnets $albSubnets --security-groups $albSecurityGroups --tags $tags";
+  $resultJson = runCmd( "$awsCmd elbv2 create-load-balancer $args" );
+  my $alb = $json->decode($resultJson);
+  $albArn = $alb->{LoadBalancers}->[0]->{LoadBalancerArn};
+  $albName = $alb->{LoadBalancers}->[0]->{LoadBalancerName};
+
+}
+
+#
+##
+### GET CLUSTER INSTANCE IDs ###
+
+print color('bold blue'), "• Getting EC2 instances in '$clusterName' ECS cluster...\n", color('reset');
+
+$resultJson = runCmd( "$awsCmd ecs list-container-instances --cluster $clusterName" );
+if ($resultJson)
+{
+  my $instancesRef = $json->decode($resultJson);
+  @containerInstanceArns = @{$instancesRef->{containerInstanceArns}};
+  $resultJson = runCmd( "$awsCmd ecs describe-container-instances --cluster $clusterName --container-instances @containerInstanceArns" );
+  $instancesRef = $json->decode($resultJson);
+  @containerInstanceIds = ();
+  for my $instance (@{$instancesRef->{containerInstances}})
+  {
+    push (@containerInstanceIds,$instance->{ec2InstanceId});
+  }
+}
+
+#
+##
+### CREATE/UPDATE AWS Target Group ###
+
+print color('bold blue'), "• Checking for ALB target group...\n", color('reset');
+
+$resultJson = runCmd( "aws elbv2 describe-target-groups --max-items 1 --names $deployName" , 0 , 1 );
+
+$targetGroupARN = '';
+
+if ($resultJson)
+{
+  $resultRef = $json->decode($resultJson);
+
+  $targetGroupARN = $resultRef->{TargetGroups}->[0]->{TargetGroupArn}; # get TargetGroupArn
+}
+
+$healthCheckArgs = "--health-check-interval-seconds 10 --health-check-path $healthCheckPath";
+
+unless ($targetGroupARN)
+{
+  print color('bold blue'), "▸ Creating '$deployName' target group...\n", color('reset');
+  my $args = "--protocol HTTP --port 80 --vpc-id $albVpcId $healthCheckArgs";
+  $resultJson = runCmd( "$awsCmd elbv2 create-target-group --name $deployName $args" );
+}
+else
+{
+  print color('bold blue'), "▸ Creating '$deployName' target group...\n", color('reset');
+  my $args = $healthCheckArgs;
+  $resultJson = runCmd( "$awsCmd elbv2 modify-target-group --target-group-arn $targetGroupARN $args" );
+}
+$resultRef = $json->decode($resultJson); # convert JSON to native perl hash
+$targetGroupARN = $resultRef->{TargetGroups}->[0]->{TargetGroupArn}; # get TargetGroupArn
+
+my $targets = '';
+foreach $target ( @containerInstanceIds )
+{
+  $targets .= "Id=$target,Port=$hostPort "
+}
+
+if ($targetGroupARN)
+{
+  $resultJson = runCmd( "$awsCmd elbv2 register-targets --target-group-arn $targetGroupARN --targets $targets" );
+}
+
+#
+##
+### CREATE/UPDATE AWS ALB Listeners ###
+
+print color('bold blue'), "• Checking for ALB listeners...\n", color('reset');
+$hasHTTPListener = runCmd( qq{$awsCmd elbv2 describe-listeners --load-balancer-arn $albArn | grep '"Protocol": "HTTP"'}, 0, 1 );
+#$resultRef = $json->decode($resultJson); # convert JSON to native perl hash
+
+unless ($hasHTTPListener)
+{
+  print color('bold blue'), "▸ Creating HTTP ALB listener...\n", color('reset');
+
+  $args = "--protocol HTTP --port 80 --default-actions Type=forward,TargetGroupArn=$targetGroupARN";
+  $resultJson = runCmd( "$awsCmd elbv2 create-listener --load-balancer-arn $albArn $args" );
+}
+
+#
+##
+### CREATE/UPDATE AWS ECS SERVICE ###
+
+print color('bold blue'), "• Checking for ECS service...\n", color('reset');
+
+$cmd = "$awsCmd ecs describe-services --cluster $clusterName --services $serviceName | grep serviceArn";
+$svcExists = runCmd( $cmd , $verbose , 1 );
+
+$args = "--cluster $clusterName --task-definition $taskName";
+
+unless ($svcExists)
+{
+  print color('bold blue'), "▸ Creating '$serviceName' ECS service...\n", color('reset');
+  # create the running ECS service with the latest task definition
+  # no verbose since output is explicitly handled.
+  $resultJson = runCmd( "$awsCmd ecs create-service --service-name $serviceName $args --desired-count $taskCount" );
+}
+
+sleep 10;
+
+#else
+#{
+  print color('bold blue'), "▸ Updating running ECS service...\n", color('reset');
+
+  # update the running ECS service with the latest task definition
+  # no verbose since output is explicitly handled.
+  $resultJson = runCmd( "$awsCmd ecs update-service --service $serviceName $args" );
+#}
+
+# recreate JSON text block, omitting all but 3 latest event entries (for readability)
+
+$resultRef = $json->decode($resultJson); # convert JSON to native perl hash
+
+$eventsRef = $resultRef->{service}->{events}; # get events
+
+$resultRef->{service}->{events} = [ # overwrite original with only top 3
+  $eventsRef->[0],
+  $eventsRef->[1],
+  $eventsRef->[2]
+];
+
+print $json->encode($resultRef); # print as JSON
+
+$runningCount = $resultRef->{service}->{runningCount};
+
+$lastEventMessage = $eventsRef->[0]->{message};
+
+print "\n" , color('bold');
+
+sleep 10; # let container settle
+
+unless ($runningCount)
+{
+  my $url = 'CloudWatch Logs (https://console.aws.amazon.com/cloudwatch/home#logs:)';
+  die color('red'), "Container failed. Check $url for errors.", color('reset'), "\n";
+}
+
+if ($lastEventMessage =~ /has reached a steady state|has started/ && $runningCount)
+{
+  print color('green'), "✔ Deploy complete!", color('reset'), "\n";
+
+  print "The site is now live at $deployURL\n";
+}
+else
+{
+   my $url = 'CloudWatch Logs (https://console.aws.amazon.com/cloudwatch/)';
+
+  die color('red'),
+      "Deploy failed:\n$lastEventMessage\n\nCheck $url for additional errors.",
+        color('reset'), "\n";
+}
