@@ -13,7 +13,7 @@ Fully automated AWS ECS deployments, including creation of Docker images, ECS Ta
 8. Create the required deploy info file, which contains all deployment settings. (See `examples/`.)
 9. Run ecs-deploy -d /path/to/deployInfo.json -t /path/to/taskDefinition.json
 
-**ecs-deploy will then:**:
+**ecs-deploy will then:**
 - Create a CloudWatch logs group
 - Create the Docker ECR repo
 - Build the Docker image
