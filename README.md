@@ -56,13 +56,13 @@ $ ecs-deploy [-c awsCreds] -d deployInfo.json -t taskDefinition.json
 # https://docs.docker.com/engine/installation/
 
 # Build the ecs-deploy docker image
-$ docker build https://github.com/TroyConrad/ecs-deploy.git
+$ docker build https://github.com/TroyConrad/ecs-deploy.git -t ecs-deploy
 
 # Create deployInfo, taskDefinition and awsCreds files, and place into a single (e.g. $PWD) directory.
 # (See examples directory)
 
 # Usage
-$ docker run -rm -v "$PWD":/data ecs-deploy -c /data/awsCreds -d /data/deployInfo.json -t /data/taskDefinition.json
+$ docker run --rm -v "$PWD":/data ecs-deploy -c /data/awsCreds -d /data/deployInfo.json -t /data/taskDefinition.json
 ```
 
 ### Examples

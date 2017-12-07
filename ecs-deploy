@@ -20,7 +20,7 @@ package Mirum::ECS_Deploy;
 
 $SCRIPT_NAME = 'ecs-deploy';
 
-$VERSION = '1.1.0'; # Modified 06Dec2017
+$VERSION = '1.1.1'; # Modified 06Dec2017
 
 ######### ENVIRONMENT VALUES #########
 
@@ -41,7 +41,7 @@ require "/opt/$SCRIPT_NAME/$SCRIPT_NAME".'-lib.pl';
 
 my %opts = ();
 
-getopts('d:t:v:hV', \%opts); # process command line switches into $opts{*} vars
+getopts('c:d:t:v:hV', \%opts); # process command line switches into $opts{*} vars
 
 our $VERBOSITY = $opts{v} ||= 1;
 
