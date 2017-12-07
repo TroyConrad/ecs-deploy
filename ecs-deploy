@@ -20,7 +20,7 @@ package Mirum::ECS_Deploy;
 
 $SCRIPT_NAME = 'ecs-deploy';
 
-$VERSION = '1.0.2'; # Modified 05Dec2017
+$VERSION = '1.1.0'; # Modified 06Dec2017
 
 ######### ENVIRONMENT VALUES #########
 
@@ -54,11 +54,13 @@ Fully automated AWS ECS deployments, including creation of Docker images, ECS Ta
 
 Usage:
 
-$SCRIPT_NAME [-v 1-4 ] -d <deploy-info-file> -t <task-definition-file [-h] [-V]
+$SCRIPT_NAME [-v 1-4] [-c <aws-creds-file>] -d <deploy-info-file> -t <task-definition-file [-h] [-V]
 
 Options:
 
-  -d <deploy-info-file> Path to required deploy info JSON file. Required.
+  -c <aws-creds-file>   Path to AWS creds file uses by AWS CLI. Default is '~/.aws/credentials'.
+
+  -d <deploy-info-file> Path to required deploy info JSON file.
 
   -t <task-def-file>    Path to required Docker task definition JSON file.
 
@@ -92,7 +94,14 @@ print color('bold blue'), "• Collecting deployment info...\n", color('reset');
 # init a JSON<->Perl converter object
 $json = JSON::PP->new->ascii->canonical->pretty->allow_nonref;
 
-# PROCESS DEPLOY INFO #
+# set needed env vars for the aws cli command
+if ($opts{c})
+{
+  -f $opts{c} or die "'" . $opts{c} . "' is not a valid file.\n";
+  $ENV{AWS_SHARED_CREDENTIALS_FILE} = $opts{c}; # export it for the aws command.
+}
+
+ # PROCESS DEPLOY INFO #
 
 $deployInfoFile = $opts{d} ||= 'deployInfo.json';
 
